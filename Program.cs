@@ -1,18 +1,21 @@
 ﻿using Parser;
+using System.Threading.Tasks;
 
 string startUrl = "https://www.toy.ru/catalog/boy_transport";
 
+var watch = new System.Diagnostics.Stopwatch();
+watch.Start();
+
 var engine = new Engine(startUrl);
 
-var products = await engine.Parse();
-
-CSVWritter.Write(products);
+CSVWritter.Write(await engine.Parse());
 
 await engine.ChangeRegion("Ростов");
 
-products = await engine.Parse();
+CSVWritter.Write(await engine.Parse());
 
-CSVWritter.Write(products);
+Console.WriteLine($"Парсинг отработал за : {watch.Elapsed.TotalSeconds} с.");
+watch.Stop();
 
 Console.WriteLine("Конец");
 Console.ReadKey();

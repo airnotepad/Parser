@@ -15,6 +15,13 @@ namespace Parser
         private Dictionary<string, CookieContainer> cookies = new();
         private RWLock _lock = new RWLock();
 
+        public CookieProvider(Dictionary<string, CookieContainer> cookies)
+        {
+            this.cookies = cookies;
+        }
+
+        public CookieProvider() { }
+
         public string GetCookie(Url url)
         {
             using (_lock.ReadLock())

@@ -45,7 +45,6 @@ public class RWLock : IDisposable
         public void Dispose() => @lock.ExitReadLock();
     }
 
-
     private readonly ReaderWriterLockSlim @lock;
 
     public ReadLockToken ReadLock() => new ReadLockToken(@lock);

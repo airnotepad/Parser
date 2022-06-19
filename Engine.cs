@@ -1,28 +1,32 @@
 ﻿using AngleSharp;
 using AngleSharp.Dom;
+using AngleSharp.Io.Network;
 using AngleSharp.Js;
+using RestSharp;
+using System.Collections.Concurrent;
 
 namespace Parser
 {
     public class Engine
     {
-        //Победить скорость загрузки страниц стандартными заглушками библиотеки AS не удалось, проблема заключается в контейнере куков.
-        //Использование контейнера в любом виде по сути превращает код в синхронный. Именно поэтому это находится здесь.
-        bool needUseCookies;
         string url = string.Empty;
         IConfiguration config;
         CookieProvider cookieHandler;
+        ParallelOptions parallelOptions;
 
-        public Engine(string startUrl)
+        public Engine(string startUrl, ParallelOptions? options = null)
         {
             url = startUrl;
             cookieHandler = new CookieProvider();
             config = Configuration.Default.WithDefaultLoader().WithCookies(cookieHandler);
+            parallelOptions = options is not null ? options : new ParallelOptions() { MaxDegreeOfParallelism = 15 };
         }
 
-        public async Task<List<Product>> Parse()
+        string cookies = string.Empty;
+
+        public async Task<IEnumerable<Product>> Parse()
         {
-            List<Product> result = new();
+            ConcurrentBag<Product> result = new();
             var context = BrowsingContext.New(config);
             var document = await context.OpenAsync(url);
 
@@ -35,19 +39,21 @@ namespace Parser
                 List<string> pageUrls = new();
 
                 var pageProducts = document.QuerySelectorAll(".product-card");
-                Console.WriteLine($"Товаров на странице: {pageProducts.Count()}");
-
                 foreach (var product in pageProducts)
                 {
                     var url = product.QuerySelector("meta[itemprop='url']")?.GetAttribute("content");
                     if (url is not null) pageUrls.Add(url);
                 }
 
-                var tasks = pageUrls.Select(x => ParseProductAsync(x));
-                var tastsResult = await Task.WhenAll(tasks);
-                result.AddRange(tastsResult);
+                var watch = new System.Diagnostics.Stopwatch();
+                watch.Start();
 
-                hasNextPage = currentPage.NextElementSibling is not null;
+                Parallel.ForEach(pageUrls, parallelOptions, async x => result.Add(await ParseProductAsync(x)));
+
+                watch.Stop();
+                Console.WriteLine($"Страница отработана за : {watch.Elapsed.TotalSeconds} с. -> Количество продуктов: {result.Count}");
+
+                hasNextPage = currentPage?.NextElementSibling is not null;
                 if (hasNextPage)
                 {
                     var href = currentPage.NextElementSibling.QuerySelector("a[href]").GetAttribute("href");
@@ -61,18 +67,14 @@ namespace Parser
 
         private async Task<Product> ParseProductAsync(string url)
         {
-            var context = needUseCookies
-                ? BrowsingContext.New(Configuration.Default.WithDefaultLoader().WithDefaultCookies())
-                : BrowsingContext.New(Configuration.Default.WithDefaultLoader());
+            var watch = new System.Diagnostics.Stopwatch();
+            watch.Start();
 
-            if (needUseCookies)
-            {
-                var Address = Url.Create(url);
-                var Cookie = cookieHandler.GetCookie(Address);
-                context.SetCookie(Address, Cookie.Replace(';', ','));
-            }
+            var content = await GetContent(url);
+            if (content is null) throw new Exception($"Content is null for {url}");
+            var document = await BrowsingContext.New().OpenAsync(request => request.Header("Content-Type", "text/html; charset=utf-8").Address(url).Content(content));
 
-            var document = await context.OpenAsync(url);
+            watch.Stop();
 
             var name = document.QuerySelector("[itemprop=\"name\"]").GetContent();
             var oldPrice = document.QuerySelector(".old-price").GetContent();
@@ -82,19 +84,32 @@ namespace Parser
             var region = document.QuerySelector(".select-city-link > a").GetContent().Trim();
             var images = document.QuerySelector(".detail-image")?.QuerySelectorAll("img.img-fluid[src]").Select(x => x.GetAttribute("src"));
 
-            Console.WriteLine($"{region} Product {name}");
+            Console.WriteLine($"Получен за: {watch.Elapsed.Seconds} с. -> Регион {region} Продукт {name}");
 
             return new Product()
             {
                 Name = name,
                 Url = url,
                 Available = available,
-                Breadcrumbs = breadcrumbs.ToArray(),
+                Breadcrumbs = breadcrumbs?.ToArray(),
                 Price = price,
                 OldPrice = oldPrice ?? "",
-                Images = images.ToArray(),
+                Images = images?.ToArray(),
                 Region = region
             };
+        }
+
+        private async Task<string?> GetContent(string url)
+        {
+            var client = new RestClient();
+            var request = new RestRequest(url);
+
+            string cookie = string.IsNullOrEmpty(cookies) ? string.Empty : cookies;
+            request.AddParameter("Cookie", cookie, ParameterType.HttpHeader);
+
+            var response = client.Execute(request);
+
+            return response?.Content;
         }
 
         public async Task ChangeRegion(string regionName)
@@ -113,6 +128,8 @@ namespace Parser
             var context = BrowsingContext.New(conf);
             var document = await context.OpenAsync(url).WhenStable();
 
+            var oldCookies = cookieHandler.GetCookie(Url.Create(url)) + ";";
+
             var regions = document.QuerySelector(".region-links")?.QuerySelectorAll("a[href]");
 
             var selectedRegion = regions.FirstOrDefault(x => x.TextContent.ToUpper().Contains(regionName.ToUpper()));
@@ -124,11 +141,11 @@ namespace Parser
             //Один из рабочих вариантов, когда не нужно глубоко копать JS и копать библиотеку AS
             var jsResponse = document.ExecuteScript($"SaveGeoCity('{selectedRegion.Attributes["rel"].Value}')");
 
-            document = await context.OpenAsync(url);
+            var newCookies = cookieHandler.GetCookie(Url.Create(url));
+            cookies = newCookies.Replace(oldCookies, "");
 
-            var region = document.QuerySelector(".select-city-link > a").GetContent().Trim();
-            needUseCookies = true;
-            Console.WriteLine($"Текущий регион: {region}");
+            if (!string.IsNullOrEmpty(cookies)) Console.WriteLine($"Текущий регион успешно сменен");
+            else Console.WriteLine($"Что-то пошло не так");
         }
     }
 }
